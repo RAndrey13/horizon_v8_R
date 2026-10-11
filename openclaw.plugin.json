@@ -1,0 +1,37 @@
+{
+  "id": "horizon_v8",
+  "kind": "model-provider",
+  "name": "Horizon V8",
+  "description": "Model provider for DeepSeek Web API (PoW, sessions, streaming)",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "promptOverride": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Replace the system prompt for target agents (former prism_v8). Workspace is resolved from hook context; no path map needed.",
+        "properties": {
+          "enabled": { "type": "boolean", "description": "Enable the override (default true when targetAgents is non-empty)" },
+          "targetAgents": { "type": "array", "items": { "type": "string" }, "description": "agentId list to replace systemPrompt for" },
+          "userFile": { "type": "string", "description": "File name inside the agent workspace to read as system prompt (default USER.md)" }
+        }
+      }
+    }
+  },
+  "entry": "dist/index.js",
+  "label": "Horizon V8",
+  "activation": {
+    "onStartup": true
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "horizon_v8",
+        "envVars": [
+          "HORIZON_V8_API_KEY"
+        ]
+      }
+    ]
+  }
+}

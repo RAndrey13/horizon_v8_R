@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tgz
+accounts/
+state.json
+
+# локальные бэкапы агента (не в git)
+backups/
+
+# локальные .bak-копии исходников (не в git)
+src/*.bak*
