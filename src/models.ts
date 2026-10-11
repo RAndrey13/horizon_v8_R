@@ -9,11 +9,11 @@ import type { ModelConfig } from "./types.js";
 // ---------------------------------------------------------------------------
 
 export const MODEL_CONFIGS: Record<string, ModelConfig> = {
-  "deepseek-chat":     { model_type: "default", thinking_enabled: false, search_enabled: false, real_model: "DeepSeek V4 Flash",         contextWindow: 131072, maxTokens: 8192,  reasoning: false },
-  "deepseek-default":  { model_type: "default", thinking_enabled: false, search_enabled: false, real_model: "DeepSeek V4 Flash",         contextWindow: 131072, maxTokens: 8192,  reasoning: false },
-  "deepseek-reasoner": { model_type: "default", thinking_enabled: true,  search_enabled: false, real_model: "DeepSeek V4 Flash Thinking", contextWindow: 131072, maxTokens: 8192,  reasoning: true  },
-  "deepseek-expert":   { model_type: "expert",  thinking_enabled: false, search_enabled: false, real_model: "DeepSeek Web Expert",       contextWindow: 131072, maxTokens: 8192,  reasoning: false },
-  "deepseek-v4-pro":   { model_type: "expert",  thinking_enabled: true,  search_enabled: false, real_model: "DeepSeek Expert Thinking",  contextWindow: 131072, maxTokens: 8192,  reasoning: true  },
+  "deepseek-chat":     { model_type: "default", thinking_enabled: false, search_enabled: true, real_model: "DeepSeek V4 Flash",         contextWindow: 131072, maxTokens: 8192,  reasoning: false },
+  "deepseek-default":  { model_type: "default", thinking_enabled: false, search_enabled: true, real_model: "DeepSeek V4 Flash",         contextWindow: 131072, maxTokens: 8192,  reasoning: false },
+  "deepseek-reasoner": { model_type: "default", thinking_enabled: true,  search_enabled: true, real_model: "DeepSeek V4 Flash Thinking", contextWindow: 131072, maxTokens: 8192,  reasoning: true  },
+  "deepseek-expert":   { model_type: "expert",  thinking_enabled: false, search_enabled: true, real_model: "DeepSeek Web Expert",       contextWindow: 131072, maxTokens: 8192,  reasoning: false },
+  "deepseek-v4-pro":   { model_type: "expert",  thinking_enabled: true,  search_enabled: true, real_model: "DeepSeek Expert Thinking",  contextWindow: 131072, maxTokens: 8192,  reasoning: true  },
 };
 
 export const SUPPORTED_MODELS = Object.keys(MODEL_CONFIGS);

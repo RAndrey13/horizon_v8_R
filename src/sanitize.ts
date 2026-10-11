@@ -264,7 +264,8 @@ function trimIncompleteTail(msgs: any[]): any[] {
 // Рядом дописывается .jsonl — по строке на каждый ход со сводкой (история).
 function dumpCompactDebug(messages: any[], summaryMsgs: any[], loopMessages: any[]): void {
   try {
-    const path = process.env.HORIZON_COMPACT_DUMP_PATH || "/root/horizon_v8_compact_dump.json";
+    const path = (process.env.HORIZON_COMPACT_DUMP_PATH || "").trim();
+    if (!path) return; // opt-in only: no default path
     const safe = (m: any) => {
       const role = m?.role;
       let content = m?.content;
@@ -320,7 +321,8 @@ function dumpCompactDebug(messages: any[], summaryMsgs: any[], loopMessages: any
 // иначе /root/horizon_v8_raw_messages.json.
 function dumpRawMessages(messages: any[]): void {
   try {
-    const path = process.env.HORIZON_RAW_DUMP_PATH || "/root/horizon_v8_raw_messages.json";
+    const path = (process.env.HORIZON_RAW_DUMP_PATH || "").trim();
+    if (!path) return; // opt-in only: no default path
     const seen = new WeakSet();
     const json = JSON.stringify(messages, (_k, v) => {
       if (typeof v === "bigint") return String(v);

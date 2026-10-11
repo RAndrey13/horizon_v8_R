@@ -125,17 +125,21 @@ export async function callDeepSeekWeb(
   let activeAccount = account;
   let dsHeaders = account.headers;
 
-  // 0. Full-cycle dump: the log is REWRITTEN on the user turn and the
-  // tool round-trips of the same cycle are APPENDED, so the whole
-  // question -> tool -> observation -> answer sequence is one block.
+  // 0. Full-cycle dump (opt-in via HORIZON_REQUEST_LOG): the log is REWRITTEN
+  // on the user turn and the tool round-trips of the same cycle are APPENDED,
+  // so the whole question -> tool -> observation -> answer sequence is one
+  // block. Disabled by default - there is no default path, so nothing is
+  // written unless the operator asks for it.
   try {
-    const mode = (fullPrompt !== undefined && fullPrompt === prompt) ? "full" : "minimal";
-    const ts = new Date().toISOString();
-    const isToolTurn = /^Observation \(/.test(prompt);
-    const line = JSON.stringify({ ts, chatSessionId: session.id, modelType, mode, parentMessageId: parentIdForRequest(session), thinking_enabled: thinkingEnabled, search_enabled: searchEnabled, action: null, preempt: false, ref_file_ids: refFileIds, len: prompt.length, fullLen: (fullPrompt ?? prompt).length, prompt }, null, 2) + "\n";
-    const logPath = process.env.HORIZON_REQUEST_LOG || "/root/horizon_v8_request.log";
-    if (isToolTurn) appendFileSync(logPath, line, "utf-8");
-    else writeFileSync(logPath, line, "utf-8");
+    const logPath = (process.env.HORIZON_REQUEST_LOG || "").trim();
+    if (logPath) {
+      const mode = (fullPrompt !== undefined && fullPrompt === prompt) ? "full" : "minimal";
+      const ts = new Date().toISOString();
+      const isToolTurn = /^Observation \(/.test(prompt);
+      const line = JSON.stringify({ ts, chatSessionId: session.id, modelType, mode, parentMessageId: parentIdForRequest(session), thinking_enabled: thinkingEnabled, search_enabled: searchEnabled, action: null, preempt: false, ref_file_ids: refFileIds, len: prompt.length, fullLen: (fullPrompt ?? prompt).length, prompt }, null, 2) + "\n";
+      if (isToolTurn) appendFileSync(logPath, line, "utf-8");
+      else writeFileSync(logPath, line, "utf-8");
+    }
   } catch (e) {
     // logging must never break the request
   }

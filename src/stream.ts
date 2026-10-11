@@ -15,6 +15,7 @@ import { getSession, deriveSessionKey } from "./sessions.js";
 import { selectAccount, markAccountFailure, markAccountSuccess, resetWebSession } from "./accounts.js";
 import { decideSessionMode, tokenLimit, estimateTokens, countCompactionSummaries, latestCompactionSignature } from "./registry.js";
 import { mylog } from "./logger.js";
+import { dumpRawToolCall } from "./diag.js";
 
 // A body that starts like an actual tool-call envelope must never be shown as
 // assistant text (fragments such as `{"tool_call` leak into chat and make the
@@ -330,6 +331,10 @@ let minimalPrompt = formatLastTurn(messages);
                 toolCalls = [];
               }
               let toolCall = toolCalls.length > 0 ? toolCalls[0] : null;
+              // Optional raw tap (HORIZON_RAWTC_DIAG=<path>): capture the raw
+              // response exactly where the tool calls are built, below the host
+              // validator. No-op unless the env path is set.
+              dumpRawToolCall("stream.afterParse", fullContent, toolCalls, allowedToolNames.size);
               let markupUnrepairable = false;
 
               if (allowedToolNames.size > 0 && !toolCall && looksLikeToolCallMarkup(fullContent)) {

@@ -29,6 +29,7 @@ api.registerProvider -> createStreamFn(stream.ts)
 | `pow.ts` | Решение Proof-of-Work челленджей | `solvePOW, solveFreshPow` |
 | `client.ts` | HTTP-вызов DeepSeek Web API | `callDeepSeekWeb` |
 | `stream.ts` | `createStreamFn`: SSE/JSON-Patch стриминг, оркестрация | `StreamDeps, createStreamFn` |
+| `diag.ts` | Сырой дамп tool-call (env `HORIZON_RAWTC_DIAG`, по умолчанию выкл.; авто-обрезка) | `dumpRawToolCall` |
 | `doctor.ts` | Диагностика аккаунтов | `runDoctor` |
 | `commands.ts` | Команды `hz_*` (+`accountName`) | `CommandDeps, registerCommands` |
 
@@ -36,7 +37,7 @@ api.registerProvider -> createStreamFn(stream.ts)
 
 ```
 index -> accounts, sessions, models, stream, commands
-stream -> client, parser, sanitize, models, sessions, accounts
+stream -> client, parser, sanitize, models, sessions, accounts, registry, runtime, diag
 commands -> doctor, models
 sanitize -> env
 doctor -> accounts

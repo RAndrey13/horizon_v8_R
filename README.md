@@ -4,13 +4,13 @@
 Предоставляет несколько бэкендов через единый OpenAI-совместимый endpoint на localhost.
 
 > **Fork note (RAndrey13).** This is the upstream project by
-> [amalkovich1](https://github.com/amalkovich1/horizon_v8) with two local fixes
+> [amalkovich1](https://github.com/amalkovich1/horizon_v8) with local fixes
 > applied on top (see [Fixes in this fork](#fixes-in-this-fork) below).
 > Upstream license: MIT.
 
 ## Fixes in this fork
 
-Two independent fixes for the DeepSeek Web wrapper, contributed upstream as
+Fixes for the DeepSeek Web wrapper. The first two are contributed upstream as
 [pull request #34](https://github.com/amalkovich1/horizon_v8/pull/34):
 
 ### 1. `stream`: never emit reasoning as visible text
@@ -32,6 +32,24 @@ text instead of a normal reply. **Tool schemas are preserved**, so tool calls
 keep working.
 
 Files: `src/sanitize.ts`
+
+### 3. `diag`: reproducible, opt-in diagnostics
+
+The built `dist/` used to carry a hand-written probe that wrote every raw model
+response to a hardcoded absolute path - and was absent from `src/`, so a clean
+`tsc` build silently dropped it. It is now a proper module, `src/diag.ts`,
+invoked from `src/stream.ts` and gated by `HORIZON_RAWTC_DIAG` (off by default,
+auto-trimmed). The request/compact/raw dumps no longer fall back to a
+Linux-only `/root/...` path.
+
+Files: `src/diag.ts`, `src/stream.ts`, `src/client.ts`, `src/sanitize.ts`
+
+### 4. `models`: enable DeepSeek Web search on all aliases
+
+`search_enabled` is now `true` for every alias (`deepseek-chat`,
+`deepseek-default`, `deepseek-reasoner`, `deepseek-expert`, `deepseek-v4-pro`).
+
+Files: `src/models.ts`
 
 ## Мотивация
 
@@ -274,8 +292,9 @@ MIT
   `Conversation data`, `Sender (untrusted metadata)`, `Active exec sessions`/`Active Subagents`,
   ведущую дату `[<ISO> GMT+..]`; пустой хвост -> `""` (ход уходит full).
 - Диагностика: в лог пишутся `minRaw` (до санитарии) и `minClean` (после) + `useMinimal`.
-- Дампы запроса: `/root/horizon_v8_request.log` (фактический prompt + `mode` = full|minimal + все поля POST),
-  `/root/horizon_v8_request_full.log` (полный собранный prompt). Логирование обёрнуто в try/catch.
+- Дамп запроса (по желанию): задайте `HORIZON_REQUEST_LOG=<path>` — туда пишется фактический
+  prompt + `mode` = full|minimal + все поля POST. Без переменной дамп не пишется (раньше молча
+  пытался писать в `/root/...`). Логирование обёрнуто в try/catch.
 - Ключ horizon-сессии: `conv:<chat_id>` (берётся из ctx-блока сообщения), иначе
   `deriveSessionKey(agentDir, sid)`.
 - `parent_message_id` уходит числом (DeepSeek ждёт u32; строка -> 422).
