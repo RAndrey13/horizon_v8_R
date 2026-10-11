@@ -51,6 +51,21 @@ Files: `src/diag.ts`, `src/stream.ts`, `src/client.ts`, `src/sanitize.ts`
 
 Files: `src/models.ts`
 
+### 5. `stream` / `sanitize`: batch tool calls and assistant thinking
+
+- A multi-call response that named one unavailable tool used to be discarded
+  **wholesale** (`toolCalls = []`), so the turn ended as a bogus "invalid
+  markup" error - or as a silent empty answer. Unknown calls are now dropped
+  individually and every known call is kept.
+- Assistant `thinking` blocks were formatted into the prompt as
+  `[thinking: ...]`: the model saw its own internal monologue as text and
+  continued it (a full prompt echo). Thinking is internal and is no longer
+  sent upstream (`formatMessages` and `formatLastTurn`).
+- A response with neither visible text nor a tool call now raises a clear error
+  instead of finishing with an empty (silent) assistant message.
+
+Files: `src/stream.ts`, `src/sanitize.ts`
+
 ## Мотивация
 
 - **FreeDeepseekAPI** — внешний процесс с открытым портом, нестабильный, требует фаервола

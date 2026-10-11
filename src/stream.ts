@@ -326,9 +326,16 @@ let minimalPrompt = formatLastTurn(messages);
               // видимый ответ, а прежний безусловный parseToolCallAll на таком
               // ходу выдавал tool-use из финализирующего текста.
               let toolCalls = allowedToolNames.size > 0 ? parseToolCallAll(fullContent) : [];
-              if (allowedToolNames.size > 0 && toolCalls.some((tc) => !allowedToolNames.has(tc.name))) {
-                mylog("info", "[horizon_v8] model requested unknown tool; treating markup as broken");
-                toolCalls = [];
+              if (allowedToolNames.size > 0 && toolCalls.length > 0) {
+                // Filter, never wipe: one hallucinated/deferred name used to
+                // discard the WHOLE batch, and the turn then ended with a bogus
+                // "invalid markup" error (or an empty/silent answer). Keep every
+                // call whose name is actually available to the host.
+                const unknown = toolCalls.filter((tc) => !allowedToolNames.has(tc.name));
+                if (unknown.length > 0) {
+                  mylog("warn", `[horizon_v8] dropping ${unknown.length} unknown tool call(s): ${unknown.map((t) => t.name).join(",")}`);
+                  toolCalls = toolCalls.filter((tc) => allowedToolNames.has(tc.name));
+                }
               }
               let toolCall = toolCalls.length > 0 ? toolCalls[0] : null;
               // Optional raw tap (HORIZON_RAWTC_DIAG=<path>): capture the raw
@@ -454,10 +461,26 @@ let minimalPrompt = formatLastTurn(messages);
                 });
                 mylog("info", `[horizon_v8] tool calls emitted: ${blocks.length}`);
               } else {
-                if (textContent) {
-                  emit({ type: "text_start", contentIndex, partial: makeEmptyPartial("assistant", sid) });
-                  emit({ type: "text_delta", contentIndex, delta: textContent, partial: makeEmptyPartial("assistant", sid) });
+                if (!textContent) {
+                  // Never hand the caller an empty (silent) assistant turn: a
+                  // response with neither visible text nor a tool call is a
+                  // failure, not an answer. Surface it loudly instead of
+                  // finishing with an empty message.
+                  const emptyUsage = makeEmptyUsage();
+                  const msg = "Модель вернула пустой ответ (ни текста, ни tool-call); запрос не выполнен.";
+                  mylog("error", `[horizon_v8] ${msg} reasoning=${reasoningContent.length}ch`);
+                  stream.push({
+                    type: "error", reason: "error",
+                    error: {
+                      role: "assistant", content: [{ type: "text", text: "" }],
+                      api: "openai-completions", provider: "horizon_v8", model: sid,
+                      usage: emptyUsage, stopReason: "error", errorMessage: msg, timestamp: Date.now(),
+                    },
+                  });
+                  return;
                 }
+                emit({ type: "text_start", contentIndex, partial: makeEmptyPartial("assistant", sid) });
+                emit({ type: "text_delta", contentIndex, delta: textContent, partial: makeEmptyPartial("assistant", sid) });
                 emit({
                   type: "text_end", contentIndex, content: textContent,
                   partial: { role: "assistant", content: [{ type: "text", text: textContent }], api: "openai-completions", provider: "horizon_v8", model: sid, usage, stopReason: "stop", timestamp: Date.now() },

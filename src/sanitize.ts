@@ -419,7 +419,6 @@ export function formatMessages(messages: any[], systemPrompt: string | undefined
         for (const block of m.content) {
           if (block.type === "toolCall") { toolCalls.push(block); }
           else if (block.type === "text") { texts.push(block.text); }
-          else if (block.type === "thinking") { texts.push(`[thinking: ${block.thinking}]`); }
         }
         if (texts.length > 0) parts.push(`Assistant: ${texts.join("\n")}`);
         for (const tc of toolCalls) {
@@ -576,7 +575,6 @@ export function formatLastTurn(messages: any[]): string {
         for (const block of m.content) {
           if (block.type === "toolCall") { toolCalls.push(block); }
           else if (block.type === "text") { texts.push(block.text); }
-          else if (block.type === "thinking") { texts.push(`[thinking: ${block.thinking}]`); }
         }
         if (texts.length > 0) parts.push(`Assistant: ${texts.join("\n")}`);
         for (const tc of toolCalls) {
