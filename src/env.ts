@@ -8,7 +8,7 @@ import type { TruncateSpec } from "./types.js";
 export function envBool(name: string, def: boolean): boolean {
   const v = process.env[name];
   if (v === undefined || v === "") return def;
-  return v === "1" || v === "true";
+  return /^(1|true|yes|on)$/i.test(v.trim());
 }
 
 // ---------------------------------------------------------------------------
@@ -78,10 +78,17 @@ export const TIME_TOKEN_RE = /^(mon|tue|wed|thu|fri|sat|sun)$|^\d{4}-\d{2}-\d{2}
 
 // HORIZON_EXTRA_SYSTEM_FILES=/path/to/TOOLS.md:/path2 — extra files appended
 // right after the System prompt (used to inject per-agent tool definitions).
-export const EXTRA_SYSTEM_FILES: string[] = (process.env.HORIZON_EXTRA_SYSTEM_FILES || "")
-  .split(":")
-  .map((s) => s.trim())
-  .filter(Boolean);
+// Separator is ';' (path-safe). ':' is accepted only for a unix-style list
+// without a Windows drive letter, since ':' collides with "C:" on Windows.
+export const EXTRA_SYSTEM_FILES: string[] = (() => {
+  const raw = (process.env.HORIZON_EXTRA_SYSTEM_FILES || "").trim();
+  if (!raw) return [];
+  let parts: string[];
+  if (raw.includes(";")) parts = raw.split(";");
+  else if (!raw.includes(":") || /^[A-Za-z]:[\\/]/.test(raw)) parts = [raw];
+  else parts = raw.split(":");
+  return parts.map((s) => s.trim()).filter(Boolean);
+})();
 
 // HORIZON_SMART_TRUNCATE (текущий дефолт ON) — сжатие Observation включено:
 // результаты инструментов (read/exec/...) обрезаются по BASE_TRUNCATE_SPECS

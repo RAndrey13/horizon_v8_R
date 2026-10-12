@@ -14,7 +14,8 @@ function stripChatWindowFromRuntimeContext(text: string): string {
   let head = text.slice(0, startIdx);
   head = head.replace(/[ \t]*\n+[ \t]*$/, "\n");
   const endIdx = text.indexOf(RUNTIME_CONTEXT_END_MARKER, startIdx);
-  if (endIdx === -1) return head;
+  // No closing marker: do NOT drop the rest — it may hold the user's real text.
+  if (endIdx === -1) return text;
   return head + RUNTIME_CONTEXT_END_MARKER + text.slice(endIdx + RUNTIME_CONTEXT_END_MARKER.length);
 }
 
@@ -391,6 +392,10 @@ export function formatMessages(messages: any[], systemPrompt: string | undefined
   if (hasSummary && loopMessages.length > 0) {
     parts.push("Continuation after the summary — reply to the last request above and the subsequent turns that were not included in the summary:");
   }
+  // Opt-in diagnostics (no-op unless HORIZON_*_DUMP_PATH is set): these were
+  // previously dead code — now actually wired into the prompt build.
+  dumpRawMessages(messages);
+  if (hasSummary) dumpCompactDebug(messages, summaryMsgs, loopMessages);
 
   let restoreMarkDone = false;
   for (const msg of loopMessages) {
@@ -638,10 +643,13 @@ function formatToolDefinitions(tools: any): string {
   }, 0);
   const compactSchemas = rawSchemaChars > Math.floor(MAX_UPSTREAM_PROMPT_CHARS * 0.4);
   // Fix 2026-10-11 (A): легаси-обвязку "TOOL REQUEST SYSTEM" убрали (clean prompt).
-  // Оставляем только то, что нужно модели: формат вызова + схемы функций.
-  // Убрано: "ONLY REASONS / you never run commands", блок RULES, "gateway" —
-  // именно этот фрейминг заставлял модель выдавать протокол вместо живого ответа.
-  let text = '\n\nИнструменты доступны через строгий JSON-вызов:\n';
+  // Fix 2026-10-12 (B): вернули КОРОТКУЮ императивную директиву вызова. Без неё
+  // модель видит схемы функций, но не считает нужным их вызывать (пустой ответ
+  // вместо tool-call) — именно на это жаловался Кэп. Убрано по-прежнему:
+  // "ONLY REASONS / you never run commands", блок RULES, "gateway".
+  let text = '\n\nИнструменты доступны через строгий JSON-вызов.\n';
+  text += 'Когда для ответа нужен инструмент — ОБЯЗАТЕЛЬНО вызови его, а не описывай вызов словами.\n';
+  text += 'Формат вызова:\n';
   text += '{"tool_call":{"name":"<function_name>","arguments":{...}}}\n';
   text += 'Legacy: TOOL_CALL: <function_name>\narguments: <JSON args>\n\n';
   text += 'Доступные функции:\n';
@@ -851,4 +859,56 @@ export function cleanMinimalPrompt(p: string): string {
   out = out.replace(/(^|\n)\s*(User|Assistant):\s*\[[^\]]*GMT[^\]]*\]\s*\n*/g, "$1$2: ");
   out = out.replace(/(^|\n)\s*\[[^\]]*GMT[^\]]*\]\s*\n+/g, "$1");
   return out.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// ---------------------------------------------------------------------------
+// Prompt budget: bound the FULL prompt sent upstream.
+// ---------------------------------------------------------------------------
+// A full resend (new web session) of an oversized conversation stalled on
+// DeepSeek Web (→ 300s timeout, no reply). This caps the assembled prompt by
+// dropping the OLDEST turn-aligned messages (summary + recent turns survive),
+// so the upstream request can never grow unbounded. Cap: chars,
+// HORIZON_MAX_FULL_PROMPT_CHARS (default 200000).
+export function dropOldestToFit(
+  messages: any[],
+  cap: number,
+  sizeOf: (msgs: any[]) => number,
+): { messages: any[]; dropped: number } {
+  const msgs = messages.slice();
+  let dropped = 0;
+  let guard = 0;
+  while (msgs.length > 1 && guard++ < 20000 && sizeOf(msgs) > cap) {
+    const i = msgs.findIndex((m) => !isSummaryRole(m));
+    if (i === -1) break;
+    // Drop a turn-aligned unit: a message plus its trailing tool results, so no
+    // toolResult is orphaned from its toolCall.
+    let j = i + 1;
+    if (msgs[i]?.role === "assistant") {
+      while (j < msgs.length && (msgs[j]?.role === "toolResult" || msgs[j]?.role === "tool")) j++;
+    }
+    msgs.splice(i, j - i);
+    dropped += j - i;
+  }
+  return { messages: msgs, dropped };
+}
+
+export function budgetFullPrompt(messages: any[], systemPrompt: string | undefined, tools: any[], runtimeBlock?: string): string {
+  const configured = Number(process.env.HORIZON_MAX_FULL_PROMPT_CHARS);
+  const cap = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 200000;
+  const full = formatMessages(messages, systemPrompt, tools, runtimeBlock);
+  if (full.length <= cap) return full;
+  // Cheap per-message size estimate (avoids re-running formatMessages, which
+  // would repeat the opt-in dumps). baseLen = constant head (system/tools/rt).
+  const msgChars = (m: any) => normalizeMessageContent(m?.content).length + 64;
+  const totalMsgs = (messages || []).reduce((s, m) => s + msgChars(m), 0);
+  const baseLen = Math.max(0, full.length - totalMsgs);
+  if (cap - baseLen <= 0) {
+    mylog("warn", `[horizon_v8] full prompt ${full.length}ch > cap ${cap}ch but the fixed head alone exceeds it; sending as-is`);
+    return full;
+  }
+  const reduced = dropOldestToFit(messages, cap - baseLen, (m) => m.reduce((s, x) => s + msgChars(x), 0));
+  if (reduced.dropped === 0) return full;
+  const out = formatMessages(reduced.messages, systemPrompt, tools, runtimeBlock);
+  mylog("warn", `[horizon_v8] full prompt ${full.length}ch > cap ${cap}ch; dropped ${reduced.dropped} oldest message(s) -> ${out.length}ch`);
+  return `[NOTE: earlier conversation truncated to fit the upstream prompt limit]\n${out}`;
 }

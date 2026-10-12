@@ -7,7 +7,7 @@ import type { Account, SessionState } from "./types.js";
 import { callDeepSeekWeb, uploadImageToDeepSeek, waitForFileReady } from "./client.js";
 import { findToolCallStartBroad, isToolCallJsonStart, parseToolCallAll } from "./parser.js";
 import { looksLikeToolCallMarkup } from "./toolparse.js";
-import { normalizeMessageContent, formatMessages, formatLastTurn, cleanMinimalPrompt, stripOpenClawContextBlock, collectImageDataUrls } from "./sanitize.js";
+import { formatLastTurn, collectImageDataUrls, budgetFullPrompt } from "./sanitize.js";
 import { buildRuntimeBlock, stripRuntimeMarkers } from "./runtime.js";
 import { envBool } from "./env.js";
 import { MODEL_CONFIGS, makeEmptyUsage, buildUsage, makeEmptyPartial } from "./models.js";
@@ -83,8 +83,8 @@ async function readBufferedStream(
       buf = lines.pop() ?? "";
       for (const line of lines) {
         const t = line.trim();
-        if (!t || !t.startsWith("data: ")) continue;
-        const raw = t.slice(6);
+        if (!t || !t.startsWith("data:")) continue;
+        const raw = t.slice(5).trim();
         if (raw === "[DONE]") continue;
         try {
           const ev = JSON.parse(raw);
@@ -131,7 +131,17 @@ async function readBufferedStream(
     if ((typeof envCode === "number" && envCode !== 0) || envTop !== 0) {
       throw new Error(`DeepSeek: envelope error code=${envTop} biz_code=${envCode} ${env?.data?.biz_msg ?? env?.biz_msg ?? env?.msg ?? ""}`);
     }
-    fullContent = bodyText;
+    if (env && typeof env === "object" && ("data" in env || "code" in env)) {
+      // Non-SSE success envelope: extract the answer; NEVER leak the raw JSON
+      // envelope as assistant text.
+      const bd = env?.data?.biz_data ?? env?.data;
+      const answer = typeof bd === "string" ? bd
+        : (bd?.answer ?? bd?.content ?? bd?.text ?? bd?.message ?? "");
+      if (!answer) throw new Error("DeepSeek: non-stream response carried no answer text");
+      fullContent = String(answer);
+    } else {
+      fullContent = bodyText;
+    }
   }
 
   return { content: fullContent, reasoning: reasoningContent, accUsage: streamAccumulatedUsage };
@@ -230,7 +240,7 @@ export function createStreamFn(ctx: any, deps: StreamDeps) {
               }
               // The full prompt is always assembled (fallback + comparison dump);
               // minimal is sent only on repeat turns while the flag is on.
-              const fullPrompt = formatMessages(messages, systemPrompt, tools, runtimeBlock);
+              const fullPrompt = budgetFullPrompt(messages, systemPrompt, tools, runtimeBlock);
               // Structural tail only (change horizon-v8-minimal-followup): the
               // minimal prompt is built solely by formatLastTurn(context.messages).
               // The old text fallback via fullPrompt.lastIndexOf("\nUser: ") is
@@ -325,6 +335,7 @@ let minimalPrompt = formatLastTurn(messages);
               // режиме markup вызова парсить/эмитить нельзя: хост ждёт только
               // видимый ответ, а прежний безусловный parseToolCallAll на таком
               // ходу выдавал tool-use из финализирующего текста.
+              let droppedUnknownNames: string[] = [];
               let toolCalls = allowedToolNames.size > 0 ? parseToolCallAll(fullContent) : [];
               if (allowedToolNames.size > 0 && toolCalls.length > 0) {
                 // Filter, never wipe: one hallucinated/deferred name used to
@@ -333,7 +344,8 @@ let minimalPrompt = formatLastTurn(messages);
                 // call whose name is actually available to the host.
                 const unknown = toolCalls.filter((tc) => !allowedToolNames.has(tc.name));
                 if (unknown.length > 0) {
-                  mylog("warn", `[horizon_v8] dropping ${unknown.length} unknown tool call(s): ${unknown.map((t) => t.name).join(",")}`);
+                  droppedUnknownNames = unknown.map((t) => t.name);
+                  mylog("warn", `[horizon_v8] dropping ${unknown.length} unknown tool call(s): ${droppedUnknownNames.join(",")}`);
                   toolCalls = toolCalls.filter((tc) => allowedToolNames.has(tc.name));
                 }
               }
@@ -438,6 +450,7 @@ let minimalPrompt = formatLastTurn(messages);
                   args: tc.args,
                 }));
                 const contentBlocks = blocks.map((b) => ({ type: "toolCall" as const, id: b.tcId, name: b.name, arguments: b.args }));
+                emit({ type: "text_start", contentIndex, partial: makeEmptyPartial("assistant", sid) });
                 emit({
                   type: "text_end", contentIndex, content: "",
                   partial: { role: "assistant", content: contentBlocks, api: "openai-completions", provider: "horizon_v8", model: sid, usage, stopReason: "toolUse" as const, timestamp: Date.now() },
@@ -465,9 +478,14 @@ let minimalPrompt = formatLastTurn(messages);
                   // Never hand the caller an empty (silent) assistant turn: a
                   // response with neither visible text nor a tool call is a
                   // failure, not an answer. Surface it loudly instead of
-                  // finishing with an empty message.
+                  // finishing with an empty message. If the only calls were
+                  // dropped as unknown, name them — otherwise this exact case
+                  // (e.g. session_status not in the offered set) looks like
+                  // total silence.
                   const emptyUsage = makeEmptyUsage();
-                  const msg = "Модель вернула пустой ответ (ни текста, ни tool-call); запрос не выполнен.";
+                  const msg = droppedUnknownNames.length > 0
+                    ? `Модель вызвала недоступный инструмент (${droppedUnknownNames.join(",")}); вызов отброшен, видимого ответа нет.`
+                    : "Модель вернула пустой ответ (ни текста, ни tool-call); запрос не выполнен.";
                   mylog("error", `[horizon_v8] ${msg} reasoning=${reasoningContent.length}ch`);
                   stream.push({
                     type: "error", reason: "error",

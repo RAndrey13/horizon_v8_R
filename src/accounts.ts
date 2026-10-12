@@ -110,9 +110,11 @@ export async function liveCheck(auth: any): Promise<Array<{ name: string; ok: bo
       method: "POST", headers, body: JSON.stringify({ target_path: "/api/v0/chat/completion" }),
     });
     const text = await r.text();
-    checks.push({ name: "pow challenge", ok: r.ok && /biz_data|challenge/.test(text), status: r.status });
+    // Reachability only: create_pow_challenge answers OK even with a dead
+    // token/cookie, so this does NOT verify authorization.
+    checks.push({ name: "pow reachability (auth NOT verified)", ok: r.ok && /biz_data|challenge/.test(text), status: r.status });
   } catch (e: any) {
-    checks.push({ name: "pow challenge", ok: false, error: e.message });
+    checks.push({ name: "pow reachability (auth NOT verified)", ok: false, error: e.message });
   }
   return checks;
 }
@@ -156,28 +158,29 @@ export function resetWebSession(session: SessionState): void {
 }
 
 export function selectAccount(accounts: Account[], session: SessionState, rr: { value: number }): Account {
+  if (accounts.length === 0) throw new Error("No accounts configured");
+  const now = Date.now();
   if (session.accountId) {
     const sticky = accounts.find(a => a.id === session.accountId);
-    if (sticky && sticky.cooldownUntil <= Date.now()) return sticky;
-    const alt = accounts.find(a => a.id !== session.accountId && a.cooldownUntil <= Date.now());
+    if (sticky && sticky.cooldownUntil <= now) return sticky;
+    const alt = accounts.find(a => a.id !== session.accountId && a.cooldownUntil <= now);
     if (alt) {
       resetWebSession(session);
       session.accountId = alt.id;
       return alt;
     }
-    for (const a of accounts) { a.cooldownUntil = 0; a.failures = 0; }
-    if (sticky) return sticky;
-    if (accounts.length === 0) throw new Error("No accounts configured");
-    session.accountId = accounts[0].id;
-    return accounts[0];
+    // No ready account: take the earliest-recovering one WITHOUT wiping every
+    // backoff (wiping hammered a failing account). A switch means a new web
+    // chat, so the session MUST be reset — otherwise the old web id leaks into
+    // the new account's headers (invalid chat session id).
+    const pick = sticky ?? accounts.reduce((b, a) => (a.cooldownUntil < b.cooldownUntil ? a : b), accounts[0]);
+    if (pick.id !== session.accountId) resetWebSession(session);
+    session.accountId = pick.id;
+    return pick;
   }
-  let ready = accounts.filter(a => a.cooldownUntil <= Date.now());
-  if (ready.length === 0) {
-    for (const a of accounts) { a.cooldownUntil = 0; a.failures = 0; }
-    ready = accounts;
-  }
-  if (ready.length === 0) throw new Error("No accounts configured");
-  const a = ready[rr.value++ % ready.length];
+  const ready = accounts.filter(a => a.cooldownUntil <= now);
+  const pool = ready.length > 0 ? ready : accounts.slice().sort((x, y) => x.cooldownUntil - y.cooldownUntil);
+  const a = pool[rr.value++ % pool.length];
   if (session.accountId && session.accountId !== a.id) resetWebSession(session);
   session.accountId = a.id;
   return a;

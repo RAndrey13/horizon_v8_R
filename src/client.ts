@@ -265,8 +265,15 @@ export async function callDeepSeekWeb(
         lastErr = e instanceof Error ? e : new Error(String(e));
         continue;
       }
-      if (r.status === 400 || r.status === 404 || r.status === 422
-        || r.status === 500 || r.status === 502 || r.status === 503 || r.status === 504) {
+      if (r.status === 400 || r.status === 404 || r.status === 422) {
+        let body = "";
+        try { body = (await r.text()).slice(0, 300); } catch {}
+        // Dead web-session id (invalid chat session): retrying the SAME id would
+        // fail identically. Fail fast so the caller recreates at once instead of
+        // burning RETRY_ATTEMPTS on a doomed session.
+        throw new Error(`HTTP ${r.status} ${body}`.trim());
+      }
+      if (r.status === 500 || r.status === 502 || r.status === 503 || r.status === 504) {
         let body = "";
         try { body = (await r.text()).slice(0, 300); } catch {}
         lastErr = new Error(`HTTP ${r.status} ${body}`.trim());
@@ -348,7 +355,10 @@ export async function callDeepSeekWeb(
     }
     try {
       await ensureSession();
-      const resp = await completeOnSameSession(prompt);
+      // On account rotation (i>0) the web session was just reset: a fresh chat
+      // needs the FULL prompt, not the minimal follow-up tail.
+      const promptToSend = i > 0 ? (fullPrompt ?? prompt) : prompt;
+      const resp = await completeOnSameSession(promptToSend);
       markAccountSuccess(acct);
       return resp;
     } catch (e: any) {
@@ -357,10 +367,12 @@ export async function callDeepSeekWeb(
       markSessionFailed(session, msg);
       const limit = tokenLimit();
       const budget = shouldCompactForLimit(session, limit);
-      if (isDeadSessionError(msg) || budget.compact) {
-        // The id is unusable or the budget is nearly gone: recreate the chat on
-        // THIS account once (full prompt) before giving up on it.
-        if (budget.compact) requestCoreCompaction(session, budget.reason);
+      if (budget.compact) requestCoreCompaction(session, budget.reason);
+      if (isDeadSessionError(msg)) {
+        // The id is unusable: recreate the chat on THIS account once (full
+        // prompt) before giving up on it. The soft budget alone must NOT force
+        // a full-prompt recreate — core compaction is unavailable, so rotating
+        // on the budget only produced a giant prompt (the hang).
         mylog("warn", `[horizon_v8] session ${session.failedSessionId} failed on account ${acct.name} (${session.lastError}); recreating web session with full prompt`);
         try {
           return await recreateSessionAndRetry();
@@ -415,6 +427,7 @@ export async function uploadImageToDeepSeek(dataUrl: string, account: Account): 
   const wasmUrl = account.config.wasmUrl || "";
   const powB64 = await solveUploadPow(dsHeaders, wasmUrl);
 
+  if (!dataUrl.startsWith("data:")) throw new Error("uploadImageToDeepSeek: expected a data: URL");
   const comma = dataUrl.indexOf(",");
   const meta = comma >= 0 ? dataUrl.slice(5, comma) : "image/jpeg";
   const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
