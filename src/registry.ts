@@ -157,9 +157,5 @@ export function shouldCompactForLimit(
  * TODO: подключить реальный вызов компакта ядра (compaction trigger).
  */
 export function requestCoreCompaction(s: RegistryCounters, reason: string): void {
-  // Core compaction is NOT available to the plugin (no host API). Rotation is
-  // the only lever, and it is driven by the hard limit in decideSessionMode.
-  // Informational only — must NOT force a full-prompt recreate (that produced
-  // the giant resend that stalled on DeepSeek Web).
-  mylog("warn", `[horizon_v8] core compaction unavailable (no host API); soft budget hit id=${s.id ?? "-"} reason=${reason}`);
+  mylog("warn", `[horizon_v8] requestCoreCompaction (STUB) id=${s.id ?? "-"} reason=${reason}`);
 }

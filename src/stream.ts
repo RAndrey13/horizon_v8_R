@@ -7,7 +7,7 @@ import type { Account, SessionState } from "./types.js";
 import { callDeepSeekWeb, uploadImageToDeepSeek, waitForFileReady } from "./client.js";
 import { findToolCallStartBroad, isToolCallJsonStart, parseToolCallAll } from "./parser.js";
 import { looksLikeToolCallMarkup } from "./toolparse.js";
-import { formatLastTurn, collectImageDataUrls, budgetFullPrompt } from "./sanitize.js";
+import { normalizeMessageContent, formatMessages, formatLastTurn, cleanMinimalPrompt, stripOpenClawContextBlock, collectImageDataUrls } from "./sanitize.js";
 import { buildRuntimeBlock, stripRuntimeMarkers } from "./runtime.js";
 import { envBool } from "./env.js";
 import { MODEL_CONFIGS, makeEmptyUsage, buildUsage, makeEmptyPartial } from "./models.js";
@@ -15,7 +15,6 @@ import { getSession, deriveSessionKey } from "./sessions.js";
 import { selectAccount, markAccountFailure, markAccountSuccess, resetWebSession } from "./accounts.js";
 import { decideSessionMode, tokenLimit, estimateTokens, countCompactionSummaries, latestCompactionSignature } from "./registry.js";
 import { mylog } from "./logger.js";
-import { dumpRawToolCall } from "./diag.js";
 
 // A body that starts like an actual tool-call envelope must never be shown as
 // assistant text (fragments such as `{"tool_call` leak into chat and make the
@@ -44,8 +43,11 @@ async function readBufferedStream(
     let lastPath: string | null = null;
 
     const rebuildFragmentState = () => {
+      // Change horizon-v8-stream-finaltext: any fragment that is NOT reasoning
+      // counts as answer text. Previously only RESPONSE/SEARCH did, so a final
+      // answer emitted under an unknown fragment type was dropped entirely.
       const responseText = fragments
-        .filter((f) => f && (f.type === "RESPONSE" || f.type === "SEARCH") && typeof f.content === "string")
+        .filter((f) => f && f.type !== "THINK" && f.type !== "REASONING" && typeof f.content === "string")
         .map((f) => f.content as string)
         .join("");
       const thinkText = fragments
@@ -83,8 +85,8 @@ async function readBufferedStream(
       buf = lines.pop() ?? "";
       for (const line of lines) {
         const t = line.trim();
-        if (!t || !t.startsWith("data:")) continue;
-        const raw = t.slice(5).trim();
+        if (!t || !t.startsWith("data: ")) continue;
+        const raw = t.slice(6);
         if (raw === "[DONE]") continue;
         try {
           const ev = JSON.parse(raw);
@@ -100,12 +102,25 @@ async function readBufferedStream(
             appendFragments(ev.v);
           } else if (lastPath === "response" && ev.v !== undefined) {
             applyPatchOps(ev.v);
+          } else if (lastPath && /^response\/fragments\/\d+\/content$/.test(lastPath) && ev.v !== undefined && typeof ev.v !== "object") {
+            // Change horizon-v8-stream-finaltext: numeric fragment index
+            // (fragments/<n>/content) was not handled at all, so a delta that
+            // addressed an existing fragment by id was silently ignored.
+            const idx = Number(lastPath.split("/")[2]);
+            let target = fragments.find((f) => f && f.id === idx);
+            if (!target) { target = { id: idx, type: "RESPONSE", content: "" }; fragments.push(target); }
+            target.content = `${target.content || ""}${ev.v}`;
+            rebuildFragmentState();
           } else if (lastPath === "response/fragments/-1/content" && ev.v !== undefined && typeof ev.v !== "object") {
-            if (fragments.length > 0) {
-              const lastFragment = fragments[fragments.length - 1];
-              lastFragment.content = `${lastFragment.content || ""}${ev.v}`;
-              rebuildFragmentState();
+            // Change horizon-v8-stream-finaltext: DeepSeek sometimes streams the
+            // whole final answer ONLY as `-1/content` deltas with no base
+            // fragment. Create the last fragment instead of dropping the text.
+            if (fragments.length === 0) {
+              fragments.push({ type: "RESPONSE", content: "" });
             }
+            const lastFragment = fragments[fragments.length - 1];
+            lastFragment.content = `${lastFragment.content || ""}${ev.v}`;
+            rebuildFragmentState();
           } else if (lastPath === "response/content" && ev.v !== undefined && typeof ev.v !== "object") {
             fullContent += ev.v;
           } else if (typeof ev.v === "number" && (lastPath || "").endsWith("accumulated_token_usage")) {
@@ -131,17 +146,7 @@ async function readBufferedStream(
     if ((typeof envCode === "number" && envCode !== 0) || envTop !== 0) {
       throw new Error(`DeepSeek: envelope error code=${envTop} biz_code=${envCode} ${env?.data?.biz_msg ?? env?.biz_msg ?? env?.msg ?? ""}`);
     }
-    if (env && typeof env === "object" && ("data" in env || "code" in env)) {
-      // Non-SSE success envelope: extract the answer; NEVER leak the raw JSON
-      // envelope as assistant text.
-      const bd = env?.data?.biz_data ?? env?.data;
-      const answer = typeof bd === "string" ? bd
-        : (bd?.answer ?? bd?.content ?? bd?.text ?? bd?.message ?? "");
-      if (!answer) throw new Error("DeepSeek: non-stream response carried no answer text");
-      fullContent = String(answer);
-    } else {
-      fullContent = bodyText;
-    }
+    fullContent = bodyText;
   }
 
   return { content: fullContent, reasoning: reasoningContent, accUsage: streamAccumulatedUsage };
@@ -158,6 +163,11 @@ export interface StreamDeps {
 export function createStreamFn(ctx: any, deps: StreamDeps) {
   const { accounts, sessions, rrRef, inFlightRef, persist } = deps;
   return async (model: any, context: any, options?: any) => {
+    // Change horizon-v8-log-stream-call: warn-level marker fires on EVERY
+    // stream call regardless of the hz_log info gate, so one live run proves
+    // whether the plugin is reached at all (info markers are gated off after
+    // a restart).
+    mylog("warn", `[horizon_v8] stream call model=${model?.id ?? model?.name ?? "?"} lane=${(context as any)?.lane ?? "?"}`);
           const stream = createAssistantMessageEventStream();
           const sid = model?.id || "deepseek-default";
           const mc = MODEL_CONFIGS[sid];
@@ -240,7 +250,7 @@ export function createStreamFn(ctx: any, deps: StreamDeps) {
               }
               // The full prompt is always assembled (fallback + comparison dump);
               // minimal is sent only on repeat turns while the flag is on.
-              const fullPrompt = budgetFullPrompt(messages, systemPrompt, tools, runtimeBlock);
+              const fullPrompt = formatMessages(messages, systemPrompt, tools, runtimeBlock);
               // Structural tail only (change horizon-v8-minimal-followup): the
               // minimal prompt is built solely by formatLastTurn(context.messages).
               // The old text fallback via fullPrompt.lastIndexOf("\nUser: ") is
@@ -255,11 +265,19 @@ let minimalPrompt = formatLastTurn(messages);
               const hasParent = parentNum !== null && Number.isFinite(parentNum) && parentNum > 0;
               const hasAssistant = messages.some((m: any) => m?.role === "assistant");
               const followupEnabled = envBool("HORIZON_MINIMAL_FOLLOWUP", true);
+              // Change horizon-v8-tools-in-minimal: the minimal follow-up tail
+              // (formatLastTurn) contains NO tool definitions, so a continuation
+              // turn would reach the model with zero knowledge of the tools and
+              // it answers with prose instead of a call. When tools are offered,
+              // always send the full prompt that carries the TOOL REQUEST SYSTEM
+              // block; minimal is allowed only when there are no tools at all.
+              const hasTools = (tools?.length ?? 0) > 0;
               const useMinimal =
                 followupEnabled &&
                 decision.mode === "continue" &&
                 hasParent &&
                 hasAssistant &&
+                !hasTools &&
                 minimalPrompt.trim().length > 0;
               const minRaw = minimalPrompt.length;
               const prompt = useMinimal ? minimalPrompt : fullPrompt;
@@ -292,12 +310,17 @@ let minimalPrompt = formatLastTurn(messages);
                 mylog("warn", `[horizon_v8] image collection failed: ${e?.message || e}`);
               }
 
+              // Change horizon-v8-log-webcall: warn-level breadcrumbs around
+              // the network call, so a stream that dies silently between entry
+              // and try/catch still leaves a trace (info is gated off).
+              mylog("warn", `[horizon_v8] entering web call sid=${sid} model=${mc.model_type} thinking=${mc.thinking_enabled}`);
               const resp = await callDeepSeekWeb(
                 prompt, session, account,
                 mc.model_type, mc.thinking_enabled, mc.search_enabled,
                 refFileIds, fullPrompt,
                 { accounts, persist },
               );
+              mylog("warn", `[horizon_v8] web call returned sid=${sid}`);
 
               let fullContent = "";
               let reasoningContent = "";
@@ -312,6 +335,10 @@ let minimalPrompt = formatLastTurn(messages);
                 fullContent = buffered.content;
                 reasoningContent = buffered.reasoning;
                 streamAccumulatedUsage = buffered.accUsage;
+                mylog("warn", `[horizon_v8] stream read done sid=${sid} text=${fullContent.length}ch reasoning=${reasoningContent.length}ch`);
+                // Change horizon-v8-log-reply-head: show the FIRST 200 chars of the
+                // model's raw reply, so we can tell prose from tool-call markup.
+                mylog("warn", `[horizon_v8] reply head (first 200): ${fullContent.slice(0, 200)}`);
               }
 
               // === Разбор markup ДО эмита ====================================
@@ -331,29 +358,37 @@ let minimalPrompt = formatLastTurn(messages);
                   .filter((n: any) => typeof n === "string" && n.length > 0)
                   .map((n: string) => String(n)),
               );
+              // Change horizon-v8-log-tools-offered: count the tools the plugin
+              // actually received. tools=0 => the tool list never reaches the
+              // plugin; tools>0 but prose reply => the model ignored them.
+              mylog("warn", `[horizon_v8] tools offered=${allowedToolNames.size}`);
               // Финализация идёт с выключенными инструментами (tools=[]). В этом
               // режиме markup вызова парсить/эмитить нельзя: хост ждёт только
               // видимый ответ, а прежний безусловный parseToolCallAll на таком
               // ходу выдавал tool-use из финализирующего текста.
-              let droppedUnknownNames: string[] = [];
               let toolCalls = allowedToolNames.size > 0 ? parseToolCallAll(fullContent) : [];
-              if (allowedToolNames.size > 0 && toolCalls.length > 0) {
-                // Filter, never wipe: one hallucinated/deferred name used to
-                // discard the WHOLE batch, and the turn then ended with a bogus
-                // "invalid markup" error (or an empty/silent answer). Keep every
-                // call whose name is actually available to the host.
-                const unknown = toolCalls.filter((tc) => !allowedToolNames.has(tc.name));
-                if (unknown.length > 0) {
-                  droppedUnknownNames = unknown.map((t) => t.name);
-                  mylog("warn", `[horizon_v8] dropping ${unknown.length} unknown tool call(s): ${droppedUnknownNames.join(",")}`);
-                  toolCalls = toolCalls.filter((tc) => allowedToolNames.has(tc.name));
+              if (allowedToolNames.size > 0 && toolCalls.some((tc) => !allowedToolNames.has(tc.name))) {
+                // Change horizon-v8-per-call-filter: keep the calls we CAN run instead
+                // of zeroing the whole batch. A single stray/unknown name used to drop
+                // every valid call in the same turn and force a strict retry.
+                const kept = toolCalls.filter((tc) => allowedToolNames.has(tc.name));
+                // Change horizon-v8-log-unknown-names: name the rejected tools so a
+                // failure says WHICH unknown tool the model asked for. Previously the
+                // log only said "unknown tool", which made root-causing impossible.
+                const unknownNames = toolCalls.filter((tc) => !allowedToolNames.has(tc.name)).map((tc) => tc.name).join(", ");
+                if (kept.length > 0) {
+                  mylog("info", `[horizon_v8] model requested unknown tool; dropped ${toolCalls.length - kept.length} unknown call(s) [${unknownNames}], kept ${kept.length}`);
+                  toolCalls = kept;
+                } else {
+                  mylog("info", `[horizon_v8] model requested unknown tool(s) [${unknownNames}]; treating markup as broken`);
+                  // Change horizon-v8-log-raw-markup: dump the model's raw text so a
+                  // failure shows the EXACT markup shape and tool name, not just a
+                  // parsed (possibly mis-parsed) name.
+                  mylog("info", `[horizon_v8] raw unknown-tool markup (first 400): ${fullContent.slice(0, 400)}`);
+                  toolCalls = [];
                 }
               }
               let toolCall = toolCalls.length > 0 ? toolCalls[0] : null;
-              // Optional raw tap (HORIZON_RAWTC_DIAG=<path>): capture the raw
-              // response exactly where the tool calls are built, below the host
-              // validator. No-op unless the env path is set.
-              dumpRawToolCall("stream.afterParse", fullContent, toolCalls, allowedToolNames.size);
               let markupUnrepairable = false;
 
               if (allowedToolNames.size > 0 && !toolCall && looksLikeToolCallMarkup(fullContent)) {
@@ -365,9 +400,13 @@ let minimalPrompt = formatLastTurn(messages);
                 await new Promise((r) => setTimeout(r, 1000));
                 const strictPrompt = `[STRICT INSTRUCTION] Your previous reply was cut off and contained incomplete tool-call markup, so it could not be parsed. Do NOT continue or repeat the broken fragment. Reissue the ENTIRE response from scratch as a SINGLE strict JSON object and nothing else: {"tool_call":{"name":"<function>","arguments":{...}}}. Requirements: valid JSON only; double-quoted keys and strings; no markdown code fences; no DSML/XML tags; no commentary before or after the object; keep argument values short.`;
                 try {
+                  // Change horizon-v8-strict-retry-no-thinking: the strict retry
+                  // MUST run with thinking OFF. With thinking on, deepseek-reasoner
+                  // re-wraps the answer in DSML/<tool_calls> and the retry fails the
+                  // same way as the first attempt.
                   const retryResp = await callDeepSeekWeb(
                     strictPrompt, session, account!,
-                    mc.model_type, mc.thinking_enabled, mc.search_enabled,
+                    mc.model_type, false, mc.search_enabled,
                     refFileIds, strictPrompt,
                     { accounts, persist },
                   );
@@ -383,6 +422,8 @@ let minimalPrompt = formatLastTurn(messages);
                     toolCall = retryCalls[0];
                   } else {
                     mylog("warn", "[horizon_v8] strict retry still broken; returning safe error instead of leaking markup");
+                    mylog("warn", `[horizon_v8] raw first-attempt markup (first 400): ${fullContent.slice(0, 400)}`);
+                    mylog("warn", `[horizon_v8] raw strict-retry markup (first 400): ${retryBuffered.content.slice(0, 400)}`);
                     markupUnrepairable = true;
                     fullContent = "";
                     toolCalls = [];
@@ -433,12 +474,12 @@ let minimalPrompt = formatLastTurn(messages);
               const rawText = tcs === -1 ? fullContent : fullContent.slice(0, tcs);
               let textContent: string =
                 isToolCallJsonStart(rawText) || isToolCallEnvelopeStart(rawText) ? "" : rawText;
-              // Anti-leak guard: reasoning НИКОГДА не должен становиться
-              // видимым текстом. Раньше здесь был фолбэк textContent =
-              // reasoningContent, из-за которого внутренние размышления модели
-              // утекали в чат как обычный ответ (симптом «служебка рвёт диалог»
-              // на horizon_v8). Если видимого контента нет — оставляем пусто,
-              // reasoning уходит только в thinking-блок выше.
+              // Safety net: never lose the reply (только для случая без видимого контента).
+              if (!toolCall) {
+                if (!textContent.trim() && !fullContent.trim() && reasoningContent.trim()) {
+                  textContent = reasoningContent;
+                }
+              }
 
               if (toolCalls.length > 0) {
                 const stamp = Date.now();
@@ -450,7 +491,6 @@ let minimalPrompt = formatLastTurn(messages);
                   args: tc.args,
                 }));
                 const contentBlocks = blocks.map((b) => ({ type: "toolCall" as const, id: b.tcId, name: b.name, arguments: b.args }));
-                emit({ type: "text_start", contentIndex, partial: makeEmptyPartial("assistant", sid) });
                 emit({
                   type: "text_end", contentIndex, content: "",
                   partial: { role: "assistant", content: contentBlocks, api: "openai-completions", provider: "horizon_v8", model: sid, usage, stopReason: "toolUse" as const, timestamp: Date.now() },
@@ -474,31 +514,10 @@ let minimalPrompt = formatLastTurn(messages);
                 });
                 mylog("info", `[horizon_v8] tool calls emitted: ${blocks.length}`);
               } else {
-                if (!textContent) {
-                  // Never hand the caller an empty (silent) assistant turn: a
-                  // response with neither visible text nor a tool call is a
-                  // failure, not an answer. Surface it loudly instead of
-                  // finishing with an empty message. If the only calls were
-                  // dropped as unknown, name them — otherwise this exact case
-                  // (e.g. session_status not in the offered set) looks like
-                  // total silence.
-                  const emptyUsage = makeEmptyUsage();
-                  const msg = droppedUnknownNames.length > 0
-                    ? `Модель вызвала недоступный инструмент (${droppedUnknownNames.join(",")}); вызов отброшен, видимого ответа нет.`
-                    : "Модель вернула пустой ответ (ни текста, ни tool-call); запрос не выполнен.";
-                  mylog("error", `[horizon_v8] ${msg} reasoning=${reasoningContent.length}ch`);
-                  stream.push({
-                    type: "error", reason: "error",
-                    error: {
-                      role: "assistant", content: [{ type: "text", text: "" }],
-                      api: "openai-completions", provider: "horizon_v8", model: sid,
-                      usage: emptyUsage, stopReason: "error", errorMessage: msg, timestamp: Date.now(),
-                    },
-                  });
-                  return;
+                if (textContent) {
+                  emit({ type: "text_start", contentIndex, partial: makeEmptyPartial("assistant", sid) });
+                  emit({ type: "text_delta", contentIndex, delta: textContent, partial: makeEmptyPartial("assistant", sid) });
                 }
-                emit({ type: "text_start", contentIndex, partial: makeEmptyPartial("assistant", sid) });
-                emit({ type: "text_delta", contentIndex, delta: textContent, partial: makeEmptyPartial("assistant", sid) });
                 emit({
                   type: "text_end", contentIndex, content: textContent,
                   partial: { role: "assistant", content: [{ type: "text", text: textContent }], api: "openai-completions", provider: "horizon_v8", model: sid, usage, stopReason: "stop", timestamp: Date.now() },
@@ -538,6 +557,7 @@ let minimalPrompt = formatLastTurn(messages);
 
               mylog("info", `[horizon_v8] Done ${fullContent.length}ch (toolCalls=${toolCalls.length})`);
             } catch (e: any) {
+              mylog("warn", `[horizon_v8] stream threw sid=${sid}: ${e?.message || e}`);
               mylog("error", `[horizon_v8] Stream error: ${e.message}`);
               // Account failover is handled inside callDeepSeekWeb (every account
               // is marked there). Only mark here for failures that happened
